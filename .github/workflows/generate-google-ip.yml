@@ -1,0 +1,92 @@
+name: Generate Google IP Rules
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # 每天 UTC 03:00（新加坡 11:00）
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout 仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: 下载 IP 列表
+        run: |
+          curl -L https://raw.githubusercontent.com/m3hr4nn/googleipmonitor/main/exports/plain-text.txt -o plain-text.txt
+
+      - name: 生成 google-ip.json（IPv4在前IPv6在后 + 去重 + 数值排序）
+        run: |
+          python << 'EOF'
+          import json
+          import re
+          import ipaddress
+
+          ipv4_list = []
+          ipv6_list = []
+
+          with open("plain-text.txt", "r") as f:
+              for line in f:
+                  line = line.strip()
+                  # 匹配 IPv4
+                  if re.match(r"^\d{1,3}(\.\d{1,3}){3}/\d{1,2}$", line):
+                      ipv4_list.append(line)
+                  # 匹配 IPv6
+                  elif re.match(r"^[0-9a-fA-F:]+/\d{1,3}$", line):
+                      ipv6_list.append(line)
+
+          # 去重
+          ipv4_list = list(set(ipv4_list))
+          ipv6_list = list(set(ipv6_list))
+
+          # 数值排序
+          ipv4_list.sort(key=lambda ip: int(ipaddress.IPv4Network(ip).network_address))
+          ipv6_list.sort(key=lambda ip: int(ipaddress.IPv6Network(ip).network_address))
+
+          ip_list = ipv4_list + ipv6_list
+
+          data = {
+              "version": 3,
+              "rules": [
+                  {
+                      "ip_cidr": ip_list
+                  }
+              ]
+          }
+
+          with open("google-ip.json", "w") as f:
+              json.dump(data, f, indent=2)
+
+          print(f"IPv4: {len(ipv4_list)} | IPv6: {len(ipv6_list)} | Total: {len(ip_list)}")
+          EOF
+
+      - name: 安装 sing-box
+        run: |
+          curl -fsSL https://sing-box.app/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: 编译 srs
+        run: |
+          sing-box rule-set compile --output google-ip.srs google-ip.json
+
+      - name: 提交并推送（仅有变更时）
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+
+          git add google-ip.json google-ip.srs
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git commit -m "Auto update google IP rules"
+          git push
